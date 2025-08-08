@@ -10,7 +10,9 @@ __pycache__
 *.session-journal
 
 # tests
+# Ignore stray test files at repository root but keep files under tests/
 test*.*
+!tests/**
 splfil/
 
 # runtime files
