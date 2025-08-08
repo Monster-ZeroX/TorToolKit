@@ -1,96 +1,134 @@
-from typing import Union,Optional,List,Tuple
+from typing import Union, Optional, List, Tuple
+import asyncio
+import logging
+import os
+import shlex
+import time
 
 # ref https://info.nrao.edu/computing/guide/file-access-and-archiving/7zip/7z-7za-command-line-guide
 torlog = logging.getLogger(__name__)
 
-# TODO change the hard coded value of the size from here
+DEFAULT_SPLIT_SIZE_MB = 1900
 
-async def cli_call(cmd: Union[str,List[str]]) -> Tuple[str,str]:
-    torlog.info("Got cmd:- "+str(cmd))
-    if isinstance(cmd,str):
+
+async def cli_call(cmd: Union[str, List[str]]) -> Tuple[str, str, int]:
+    torlog.info("Got cmd:- %s", cmd)
+    if isinstance(cmd, str):
         cmd = shlex.split(cmd)
-    elif isinstance(cmd,(list,tuple)):
+    elif isinstance(cmd, (list, tuple)):
         pass
     else:
-        return None,None
+        return None, None, -1
 
-    torlog.info("Exc cmd:- "+str(cmd))
-    
+    torlog.info("Exc cmd:- %s", cmd)
+
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stderr=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE
+        stdout=asyncio.subprocess.PIPE,
     )
 
     stdout, stderr = await process.communicate()
-    
+
     stdout = stdout.decode().strip()
     stderr = stderr.decode().strip()
-    
+
     return stdout, stderr, process.returncode
 
-async def split_in_zip(path,size=None):
-    if os.path.exists(path):
-        if os.path.isfile(path):
-            fname = os.path.basename(path)
-            bdir = os.path.dirname(path)
-            bdir = os.path.join(bdir,str(time.time()).replace(".",""))
-            if not os.path.exists(bdir):
-                os.mkdir(bdir)
+async def split_in_zip(
+    path: str,
+    size: Optional[int] = None,
+    compression_level: int = 0,
+    output_dir: Optional[str] = None,
+):
+    """Split a file into multiple zip archives.
 
-            if size is None:
-                size = 1900
-            else:
-                size = int(size)
-                size = int(size/(1024*1024)) - 10 #for safe
-            cmd = f'7z a -tzip -mx=0 "{bdir}/{fname}.zip" "{path}" -v{size}m '
+    Args:
+        path: Path to the file to be archived.
+        size: Maximum part size in bytes. Defaults to ``DEFAULT_SPLIT_SIZE_MB`` MB.
+        compression_level: 7z compression level (0-9).
+        output_dir: Optional directory for the resulting archives.
 
-            _, err, rcode = await cli_call(cmd)
-            
-            if err:
-                torlog.error(f"Error in zip split {err}")
-                return None
-            else:
-                return bdir
-                
+    Returns:
+        Path to the directory containing the split archives or ``None`` on error.
+    """
+    if os.path.exists(path) and os.path.isfile(path):
+        fname = os.path.basename(path)
+        if output_dir:
+            bdir = os.path.abspath(output_dir)
         else:
-            return None
-    else:
-        return None
+            bdir = os.path.join(os.path.dirname(path), str(time.time()).replace(".", ""))
+        os.makedirs(bdir, exist_ok=True)
 
-async def add_to_zip(path, size = None, split = True):
+        if size is None:
+            size_mb = DEFAULT_SPLIT_SIZE_MB
+        else:
+            size_mb = int(int(size) / (1024 * 1024)) - 10
+        cmd = (
+            f'7z a -tzip -mx={compression_level} "{bdir}/{fname}.zip" '
+            f'"{path}" -v{size_mb}m'
+        )
+
+        _, err, _ = await cli_call(cmd)
+
+        if err:
+            torlog.error("Error in zip split %s", err)
+            return None
+        return bdir
+    return None
+
+
+async def add_to_zip(
+    path: str,
+    size: Optional[int] = None,
+    split: bool = True,
+    compression_level: int = 0,
+    output_dir: Optional[str] = None,
+):
+    """Archive a path into a zip optionally splitting it.
+
+    Args:
+        path: File or directory to archive.
+        size: Maximum part size in bytes when ``split`` is ``True``.
+        split: Whether to split the archive in parts.
+        compression_level: 7z compression level (0-9).
+        output_dir: Optional directory for the resulting archives.
+
+    Returns:
+        Path to the directory containing the archive or ``None`` on error.
+    """
     if os.path.exists(path):
         fname = os.path.basename(path)
-        bdir = os.path.dirname(path)
-        bdir = os.path.join(bdir,str(time.time()).replace(".",""))
-        if not os.path.exists(bdir):
-            os.mkdir(bdir)
-        
-        bdir = os.path.join(bdir,fname)
-        if not os.path.exists(bdir):
-            os.mkdir(bdir)
-        
-        if size is None:
-            size = 1900
+        if output_dir:
+            base_dir = os.path.abspath(output_dir)
         else:
-            size = int(size)
-            size = int(size/(1024*1024)) - 10 #for safe
+            base_dir = os.path.join(os.path.dirname(path), str(time.time()).replace(".", ""))
+        os.makedirs(base_dir, exist_ok=True)
+
+        bdir = os.path.join(base_dir, fname)
+        os.makedirs(bdir, exist_ok=True)
+
+        if size is None:
+            size_mb = DEFAULT_SPLIT_SIZE_MB
+        else:
+            size_mb = int(int(size) / (1024 * 1024)) - 10
 
         total_size = get_size(path)
-        if total_size > size and split:
-            cmd = f'7z a -tzip -mx=0 "{bdir}/{fname}.zip" "{path}" -v{size}m'
+        if total_size > size_mb and split:
+            cmd = (
+                f'7z a -tzip -mx={compression_level} "{bdir}/{fname}.zip" '
+                f'"{path}" -v{size_mb}m'
+            )
         else:
-            cmd = f'7z a -tzip -mx=0 "{bdir}/{fname}.zip" "{path}"'
-    
-        _, err, rcode = await cli_call(cmd)
-        
+            cmd = f'7z a -tzip -mx={compression_level} "{bdir}/{fname}.zip" "{path}"'
+
+        _, err, _ = await cli_call(cmd)
+
         if err:
-            torlog.error(f"Error in zip split {err}")
+            torlog.error("Error in zip split %s", err)
             return None
-        else:
-            return bdir
-    else:
-        return None
+        return bdir
+    return None
 
 def get_size(start_path = '.'):
     total_size = 0
